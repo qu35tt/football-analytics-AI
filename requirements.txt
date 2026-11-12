@@ -1,0 +1,6 @@
+opencv-python
+numpy
+supervision>=0.20.0
+ultralytics
+SoccerNet
+datasets

@@ -218,3 +218,14 @@ __marimo__/
 
 # Streamlit
 .streamlit/secrets.toml
+
+# Ignore dataset contents
+datasets/raw/*
+!datasets/raw/.gitkeep
+
+datasets/converted/*
+!datasets/converted/.gitkeep
+
+datasets/prepared/*
+!datasets/prepared/.gitkeep
+!datasets/prepared/data/.gitkeep

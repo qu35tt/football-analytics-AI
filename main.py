@@ -3,107 +3,20 @@ from pathlib import Path
 import cv2
 import numpy as np
 import supervision as sv
+from engine.tracker import PlayerGrouper, upper_torso_crop
 from ultralytics import YOLO
 
 
 VIDEO_PATH = Path("video.mp4")
-OUTPUT_DIR = Path("ouput")
-MODEL_PATH = "yolo11s.pt"
+OUTPUT_DIR = Path("output")
+MODEL_PATH = "runs/train/football-yolo11s-9/weights/best.pt"
 
-# COCO class IDs used by the model:
-# 0 = person, 32 = sports ball.
-INTERESTING_CLASSES = {0, 32}
+# Custom dataset class IDs used for training:
+# 0 = player, 1 = ball, 2 = referee
+INTERESTING_CLASSES = {0, 1, 2}
 PLAYER_CONFIDENCE = 0.15
 BALL_CONFIDENCE = 0.05
 TRAJECTORY_LENGTH = 30
-TORSO_TOP = 0.15
-TORSO_BOTTOM = 0.60
-REFEREE_COLOR_RATIO = 0.15
-
-
-def has_referee_colors(torso: np.ndarray) -> bool:
-    """Check for black, yellow, lime, or dark sky-blue jersey pixels."""
-    hsv = cv2.cvtColor(torso, cv2.COLOR_BGR2HSV)
-    hue, saturation, value = cv2.split(hsv)
-
-    black = (value <= 70) & (saturation <= 140)
-    yellow = (
-        (hue >= 18)
-        & (hue <= 40)
-        & (saturation >= 80)
-        & (value >= 70)
-    )
-    lime = (
-        (hue >= 35)
-        & (hue <= 80)
-        & (saturation >= 70)
-        & (value >= 50)
-    )
-    dark_sky_blue = (
-        (hue >= 85)
-        & (hue <= 115)
-        & (saturation >= 45)
-        & (value >= 35)
-        & (value <= 190)
-    )
-    referee_pixels = black | yellow | lime | dark_sky_blue
-    return float(np.mean(referee_pixels)) >= REFEREE_COLOR_RATIO
-
-
-def upper_torso_crop(frame: np.ndarray, box: np.ndarray) -> np.ndarray | None:
-    """Return the upper body area, excluding the head, shorts, and grass."""
-    x1, y1, x2, y2 = box.astype(int)
-    height, width = frame.shape[:2]
-    x1, x2 = max(0, x1), min(width, x2)
-    y1, y2 = max(0, y1), min(height, y2)
-    if x2 <= x1 or y2 <= y1:
-        return None
-
-    torso_y1 = y1 + int((y2 - y1) * TORSO_TOP)
-    torso_y2 = y1 + int((y2 - y1) * TORSO_BOTTOM)
-    crop = frame[torso_y1:torso_y2, x1:x2]
-    return crop if crop.size else None
-
-
-class PlayerGrouper:
-    """Groups players by torso appearance and keeps groups stable over time."""
-
-    def __init__(self) -> None:
-        self.team_colors: list[np.ndarray | None] = [None, None]
-        self.player_groups: dict[int, str] = {}
-
-    def group(self, player_id: int, torso: np.ndarray) -> str:
-        if player_id in self.player_groups:
-            return self.player_groups[player_id]
-
-        hsv = cv2.cvtColor(torso, cv2.COLOR_BGR2HSV)
-        color = np.mean(hsv.reshape(-1, 3), axis=0)
-
-        if has_referee_colors(torso):
-            self.player_groups[player_id] = "referee"
-            return "referee"
-
-        available = [i for i, team_color in enumerate(self.team_colors) if team_color is None]
-        if available:
-            team_index = available[0]
-        else:
-            distances = [
-                float(np.linalg.norm(color - team_color))
-                for team_color in self.team_colors
-                if team_color is not None
-            ]
-            team_index = int(np.argmin(distances))
-
-        if self.team_colors[team_index] is None:
-            self.team_colors[team_index] = color
-        else:
-            self.team_colors[team_index] = (
-                self.team_colors[team_index] * 0.9 + color * 0.1
-            )
-
-        group_name = f"team_{'a' if team_index == 0 else 'b'}"
-        self.player_groups[player_id] = group_name
-        return group_name
 
 
 def track_video() -> None:
@@ -112,18 +25,6 @@ def track_video() -> None:
 
     OUTPUT_DIR.mkdir(exist_ok=True)
     model = YOLO(MODEL_PATH)
-    tracker = sv.ByteTrack(
-        track_activation_threshold=PLAYER_CONFIDENCE,
-        lost_track_buffer=30,
-        minimum_matching_threshold=0.8,
-        frame_rate=30,
-    )
-    ball_tracker = sv.ByteTrack(
-        track_activation_threshold=BALL_CONFIDENCE,
-        lost_track_buffer=60,
-        minimum_matching_threshold=0.3,
-        frame_rate=30,
-    )
     trajectories: dict[tuple[str, int], list[tuple[int, int]]] = {}
     player_grouper = PlayerGrouper()
     video = cv2.VideoCapture(str(VIDEO_PATH))
@@ -138,24 +39,24 @@ def track_video() -> None:
             if not success:
                 break
 
-            # YOLO detects players and the ball. Supervision assigns tracking IDs.
-            results = model.predict(
+            # YOLO detects and tracks with native ByteTrack.
+            results = model.track(
                 frame,
                 classes=list(INTERESTING_CLASSES),
                 conf=BALL_CONFIDENCE,
+                tracker="bytetrack.yaml",
+                persist=True,
                 verbose=False,
             )
             detections = sv.Detections.from_ultralytics(results[0])
-            player_detections = detections[
+            tracked_players = detections[
                 (detections.class_id == 0)
                 & (detections.confidence >= PLAYER_CONFIDENCE)
             ]
-            ball_detections = detections[
-                (detections.class_id == 32)
+            tracked_balls = detections[
+                (detections.class_id == 1)
                 & (detections.confidence >= BALL_CONFIDENCE)
             ]
-            tracked_players = tracker.update_with_detections(player_detections)
-            tracked_balls = ball_tracker.update_with_detections(ball_detections)
 
             annotated_frame = frame.copy()
             tracked_ids = []

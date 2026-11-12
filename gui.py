@@ -2,7 +2,7 @@ from threading import Thread
 
 import cv2
 
-import main
+import main as main
 
 
 WINDOW_NAME = "SoccerNet tracking"
